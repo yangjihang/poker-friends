@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: poker
+      POSTGRES_PASSWORD: poker
+      POSTGRES_DB: poker
+    volumes:
+      - poker-db:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poker"]
+      interval: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ../backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://poker:poker@db:5432/poker
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: ../frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  poker-db:
