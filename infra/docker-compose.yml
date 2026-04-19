@@ -7,8 +7,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-poker}
     volumes:
       - poker-db:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # 不映射宿主机端口，避免和宿主机上的其他 postgres 冲突。
+    # 如需本地连 db 调试：docker compose exec db psql -U poker
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-poker}"]
       interval: 3s
@@ -29,10 +29,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # 仅 docker 网络内可见，web 容器通过 backend:8000 反代访问。
+    # 不对外映射 8000，避免和同机其他服务冲突（例如 chat-room 也用 8000）。
     expose:
       - "8000"
-    ports:
-      - "8000:8000"
 
   web:
     build:
