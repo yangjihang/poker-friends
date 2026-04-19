@@ -10,9 +10,7 @@ import { BettingControls } from "../components/BettingControls";
 
 const BOT_TIERS: Array<{ key: string; label: string }> = [
   { key: "rookie", label: "菜鸟" },
-  { key: "regular", label: "常规" },
   { key: "patron", label: "常客" },
-  { key: "semi_pro", label: "半职业" },
   { key: "pro", label: "职业" },
 ];
 
@@ -51,6 +49,8 @@ function fmtCountdown(ms: number): string {
 export default function Table() {
   const { code = "" } = useParams();
   const token = useAuth((s) => s.token)!;
+  const me = useAuth((s) => s.user);
+  const hydrate = useAuth((s) => s.hydrate);
   const navigate = useNavigate();
   const [state, setState] = useState<any>(null);
   const [flash, setFlash] = useState<string | null>(null);
@@ -76,6 +76,13 @@ export default function Table() {
       } else if (m.type === "hand_end") {
         setShowdown(m.data.showdown ?? null);
         setHandSummary(m.data);
+      } else if (m.type === "room_closed") {
+        // 关桌已做了 cashout，刷新余额。
+        API.me().then(hydrate).catch(() => {});
+      } else if (m.type === "balance_update") {
+        // 服务端在 sit/rebuy/stand 后主动推。直接合并到 auth store。
+        const cur = useAuth.getState().user;
+        if (cur) useAuth.getState().hydrate({ ...cur, balance: m.balance });
       } else if (m.type === "error") {
         setFlash(`错误：${m.msg}`);
         setTimeout(() => setFlash(null), 1800);
@@ -106,10 +113,12 @@ export default function Table() {
 
   const isMyTurn = mySeat != null && engine?.actor_seat === mySeat;
   const bb = room?.bb ?? 1;
+  const isHost = me != null && room?.created_by === me.id;
 
   function sendAction(action: string, amount?: number) {
     wsRef.current?.send({ type: "action", action, amount });
   }
+  // sit/rebuy/stand 的 balance 由后端通过 balance_update 事件推送，不用前端轮询。
   function doSit(seat: number, buyinValue: number) {
     wsRef.current?.send({ type: "sit", seat_idx: seat, buyin: buyinValue });
     setSitModal(null);
@@ -117,6 +126,9 @@ export default function Table() {
   function doAddBot(seat: number, tier: string) {
     wsRef.current?.send({ type: "add_bot", seat_idx: seat, tier });
     setBotModal(null);
+  }
+  function doRemoveBot(seat: number) {
+    wsRef.current?.send({ type: "remove_bot", seat_idx: seat });
   }
   function doRebuy(buyinValue: number) {
     wsRef.current?.send({ type: "rebuy", buyin: buyinValue });
@@ -261,6 +273,9 @@ export default function Table() {
                 canSit={mySeat == null}
                 onSit={() => setSitModal({ seat: seat.seat_idx })}
                 onAddBot={() => setBotModal({ seat: seat.seat_idx })}
+                onRemoveBot={
+                  merged.is_bot && isHost ? () => doRemoveBot(seat.seat_idx) : undefined
+                }
               />
             </div>
           );
@@ -390,6 +405,9 @@ export default function Table() {
       {sitModal && (
         <Modal onClose={() => setSitModal(null)}>
           <div className="font-semibold mb-3">坐下座位 #{sitModal.seat}</div>
+          <div className="text-xs text-white/70 mb-2">
+            我的余额：<span className="text-chip-gold font-semibold">{me?.balance ?? 0}</span>
+          </div>
           <label className="block text-sm mb-3">
             带入筹码（{room.buyin_min}~{room.buyin_max}）
             <input
@@ -398,7 +416,14 @@ export default function Table() {
               className="mt-1 w-full bg-black/40 rounded px-2 py-1"
             />
           </label>
-          <button onClick={() => doSit(sitModal.seat, buyin)} className="w-full bg-chip-gold text-black py-2 rounded-full font-semibold">
+          {me && buyin > me.balance && (
+            <div className="text-red-300 text-xs mb-2">余额不足（还差 {buyin - me.balance}）</div>
+          )}
+          <button
+            onClick={() => doSit(sitModal.seat, buyin)}
+            disabled={!me || buyin > me.balance || buyin < room.buyin_min || buyin > room.buyin_max}
+            className="w-full bg-chip-gold text-black py-2 rounded-full font-semibold disabled:opacity-40 disabled:bg-white/20 disabled:text-white"
+          >
             确认
           </button>
         </Modal>
@@ -444,6 +469,9 @@ export default function Table() {
       {rebuyOpen && (
         <Modal onClose={() => setRebuyOpen(false)}>
           <div className="font-semibold mb-3">再买入</div>
+          <div className="text-xs text-white/70 mb-2">
+            我的余额：<span className="text-chip-gold font-semibold">{me?.balance ?? 0}</span>
+          </div>
           <label className="block text-sm mb-3">
             带入筹码（{room.buyin_min}~{room.buyin_max}）
             <input
@@ -452,7 +480,14 @@ export default function Table() {
               className="mt-1 w-full bg-black/40 rounded px-2 py-1"
             />
           </label>
-          <button onClick={() => doRebuy(buyin)} className="w-full bg-chip-gold text-black py-2 rounded-full font-semibold">
+          {me && buyin > me.balance && (
+            <div className="text-red-300 text-xs mb-2">余额不足（还差 {buyin - me.balance}）</div>
+          )}
+          <button
+            onClick={() => doRebuy(buyin)}
+            disabled={!me || buyin > me.balance || buyin < room.buyin_min || buyin > room.buyin_max}
+            className="w-full bg-chip-gold text-black py-2 rounded-full font-semibold disabled:opacity-40 disabled:bg-white/20 disabled:text-white"
+          >
             确认
           </button>
         </Modal>

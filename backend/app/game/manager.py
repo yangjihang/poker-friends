@@ -72,6 +72,7 @@ class RoomManager:
                 bb=bb,
                 buyin_min=buyin_min,
                 buyin_max=buyin_max,
+                created_by=created_by,
                 max_seats=max_seats,
             )
             room.closes_at = closes_at
@@ -94,6 +95,7 @@ class RoomManager:
                 bb=rm.bb,
                 buyin_min=rm.buyin_min,
                 buyin_max=rm.buyin_max,
+                created_by=rm.created_by,
                 max_seats=rm.max_seats,
             )
             room.closes_at = rm.closes_at

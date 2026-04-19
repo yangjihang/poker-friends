@@ -9,19 +9,38 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 
 import httpx
 import websockets
 
+# smoke 测试直接连 DB 塞一条新邀请码，然后走 register。
+# 这样不依赖 admin 账号也能跑。
+from app.db import SessionLocal
+from app.models import InviteCode
+
 BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8000")
 WS_BASE = BASE.replace("http", "ws")
 
 
+async def _seed_invite() -> str:
+    code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(8))
+    async with SessionLocal() as session:
+        session.add(InviteCode(code=code))
+        await session.commit()
+    return code
+
+
 async def register(client: httpx.AsyncClient, username: str, password: str) -> tuple[str, int]:
-    r = await client.post("/api/auth/register", json={"username": username, "password": password})
-    if r.status_code == 409:
-        r = await client.post("/api/auth/login", json={"username": username, "password": password})
+    # 已存在就直接登录；否则生成一次性邀请码并注册。
+    r = await client.post("/api/auth/login", json={"username": username, "password": password})
+    if r.status_code == 401:
+        invite = await _seed_invite()
+        r = await client.post(
+            "/api/auth/register",
+            json={"username": username, "password": password, "invite_code": invite},
+        )
     r.raise_for_status()
     body = r.json()
     return body["access_token"], body["user"]["id"]
@@ -35,7 +54,7 @@ async def play_hand_via_ws(token_a: str, token_b: str, room_code: str) -> dict:
     ws_a = await websockets.connect(url_a)
     ws_b = await websockets.connect(url_b)
 
-    # A sits seat 0 with 200, B sits seat 2 with 200. A adds a regular bot on seat 5.
+    # A sits seat 0 with 200, B sits seat 2 with 200. A adds a patron bot on seat 5.
     await ws_a.send(json.dumps({"type": "sit", "seat_idx": 0, "buyin": 200}))
     await ws_b.send(json.dumps({"type": "sit", "seat_idx": 2, "buyin": 200}))
     await asyncio.sleep(0.5)
@@ -65,8 +84,8 @@ async def play_hand_via_ws(token_a: str, token_b: str, room_code: str) -> dict:
     task_a = asyncio.create_task(driver(ws_a, 0, "A"))
     task_b = asyncio.create_task(driver(ws_b, 2, "B"))
 
-    # B also adds a regular bot (so we have 3 players for a nontrivial hand)
-    await ws_b.send(json.dumps({"type": "add_bot", "seat_idx": 5, "tier": "regular"}))
+    # B also adds a patron bot (so we have 3 players for a nontrivial hand)
+    await ws_b.send(json.dumps({"type": "add_bot", "seat_idx": 5, "tier": "patron"}))
 
     try:
         await asyncio.wait_for(hand_done.wait(), timeout=45)
@@ -80,9 +99,11 @@ async def play_hand_via_ws(token_a: str, token_b: str, room_code: str) -> dict:
 
 
 async def main() -> int:
+    # 每次跑用随机用户名，避免余额被前几轮 sit 锁死（cashout 要等 2hr 关桌）。
+    suffix = secrets.token_hex(3)
     async with httpx.AsyncClient(base_url=BASE, timeout=10) as client:
-        tok_a, _ = await register(client, "alice", "password1")
-        tok_b, _ = await register(client, "bob", "password1")
+        tok_a, _ = await register(client, f"alice_{suffix}", "password1")
+        tok_b, _ = await register(client, f"bob_{suffix}", "password1")
 
         r = await client.post(
             "/api/rooms",

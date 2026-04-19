@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import decode_token
+from app.bank import adjust_balance
 from app.db import SessionLocal, get_session
 from app.game.manager import manager
+from app.game.membership import upsert_active as _member_upsert
 from app.game.room import Room
 from app.models import User
 
@@ -27,7 +29,12 @@ async def _authenticate(ws: WebSocket) -> User | None:
         return None
     async with SessionLocal() as session:
         from sqlalchemy import select
-        return await session.scalar(select(User).where(User.id == int(payload["sub"])))
+        user = await session.scalar(select(User).where(User.id == int(payload["sub"])))
+        if not user:
+            return None
+        if int(payload.get("pv", 0)) != (user.password_version or 0):
+            return None  # 改密后的旧 token
+        return user
 
 
 @router.websocket("/ws/room/{code}")
@@ -74,42 +81,120 @@ async def game_ws(ws: WebSocket, code: str):
                 if seat_idx is not None:
                     await ws.send_json({"type": "error", "msg": "already seated"})
                     continue
-                try:
-                    m = await room.sit(
-                        user_id=user.id,
-                        display_name=user.display_name,
-                        seat_idx=data.get("seat_idx"),
-                        buyin=int(data.get("buyin") or room.buyin_max),
+                buyin = int(data.get("buyin") or room.buyin_max)
+                if not (room.buyin_min <= buyin <= room.buyin_max):
+                    await ws.send_json({"type": "error", "msg": "buyin out of range"})
+                    continue
+                new_balance: int | None = None
+                # 事务：扣余额 → room.sit。任一失败则回滚。
+                async with SessionLocal() as session:
+                    from sqlalchemy import select as _sel
+                    fresh = await session.scalar(
+                        _sel(User).where(User.id == user.id).with_for_update()
                     )
-                    seat_idx = m.seat_idx
-                    room.detach_connection(None, outbound)
-                    room.attach_connection(seat_idx, outbound)
-                    await room.push_state_to_all()
-                except ValueError as e:
-                    await ws.send_json({"type": "error", "msg": str(e)})
+                    if not fresh:
+                        await ws.send_json({"type": "error", "msg": "user not found"})
+                        continue
+                    # 快照 balance，rollback 后 ORM 会过期。
+                    have = fresh.balance
+                    try:
+                        await adjust_balance(
+                            session, user=fresh, amount=-buyin, type="buyin_lock",
+                            room_id=room.id, note=f"入桌 {room.code}",
+                        )
+                    except ValueError:
+                        await session.rollback()
+                        await ws.send_json({"type": "error", "msg": f"余额不足（需要 {buyin}，当前 {have}）"})
+                        continue
+                    try:
+                        m = await room.sit(
+                            user_id=user.id,
+                            display_name=user.display_name,
+                            seat_idx=data.get("seat_idx"),
+                            buyin=buyin,
+                        )
+                    except ValueError as e:
+                        await session.rollback()
+                        await ws.send_json({"type": "error", "msg": str(e)})
+                        continue
+                    # RoomMember 快照，崩溃止损
+                    await _member_upsert(
+                        session, room_id=room.id, user_id=user.id,
+                        seat_idx=m.seat_idx, display_name=user.display_name, stack=buyin,
+                    )
+                    await session.commit()
+                    new_balance = fresh.balance
+                seat_idx = m.seat_idx
+                room.detach_connection(None, outbound)
+                room.attach_connection(seat_idx, outbound)
+                if new_balance is not None:
+                    await ws.send_json({"type": "balance_update", "balance": new_balance})
+                await room.push_state_to_all()
             elif t == "rebuy":
                 if seat_idx is None:
                     await ws.send_json({"type": "error", "msg": "not seated"})
                     continue
-                try:
-                    await room.rebuy(
-                        seat_idx=seat_idx,
-                        buyin=int(data.get("buyin") or room.buyin_max),
+                buyin = int(data.get("buyin") or room.buyin_max)
+                if not (room.buyin_min <= buyin <= room.buyin_max):
+                    await ws.send_json({"type": "error", "msg": "buyin out of range"})
+                    continue
+                new_balance = None
+                async with SessionLocal() as session:
+                    from sqlalchemy import select as _sel
+                    fresh = await session.scalar(
+                        _sel(User).where(User.id == user.id).with_for_update()
                     )
-                    await room.push_state_to_all()
-                except ValueError as e:
-                    await ws.send_json({"type": "error", "msg": str(e)})
+                    if not fresh:
+                        await ws.send_json({"type": "error", "msg": "user not found"})
+                        continue
+                    have = fresh.balance
+                    try:
+                        await adjust_balance(
+                            session, user=fresh, amount=-buyin, type="buyin_lock",
+                            room_id=room.id, note=f"补带 {room.code}",
+                        )
+                    except ValueError:
+                        await session.rollback()
+                        await ws.send_json({"type": "error", "msg": f"余额不足（需要 {buyin}，当前 {have}）"})
+                        continue
+                    try:
+                        await room.rebuy(seat_idx=seat_idx, buyin=buyin)
+                    except ValueError as e:
+                        await session.rollback()
+                        await ws.send_json({"type": "error", "msg": str(e)})
+                        continue
+                    # 刷新 RoomMember 快照为累加后的 stack
+                    mem = room.members.get(seat_idx)
+                    if mem is not None:
+                        await _member_upsert(
+                            session, room_id=room.id, user_id=user.id,
+                            seat_idx=seat_idx, display_name=user.display_name, stack=mem.stack,
+                        )
+                    await session.commit()
+                    new_balance = fresh.balance
+                if new_balance is not None:
+                    await ws.send_json({"type": "balance_update", "balance": new_balance})
+                await room.push_state_to_all()
             elif t == "stand":
                 if seat_idx is not None:
                     await room.stand_up(seat_idx)
                     room.detach_connection(seat_idx, outbound)
                     room.attach_connection(None, outbound)
                     seat_idx = None
+                    # stand_up 已经结算 balance 到 DB，这里查一下推给前端
+                    try:
+                        from sqlalchemy import select as _sel
+                        async with SessionLocal() as session:
+                            fresh = await session.scalar(_sel(User).where(User.id == user.id))
+                            if fresh is not None:
+                                await ws.send_json({"type": "balance_update", "balance": fresh.balance})
+                    except Exception:
+                        log.exception("balance_update after stand failed")
                     await room.push_state_to_all()
             elif t == "add_bot":
                 try:
                     await room.add_bot(
-                        tier=data.get("tier") or "regular",
+                        tier=data.get("tier") or "patron",
                         seat_idx=data.get("seat_idx"),
                         buyin=data.get("buyin"),
                     )
@@ -118,9 +203,14 @@ async def game_ws(ws: WebSocket, code: str):
                     await ws.send_json({"type": "error", "msg": str(e)})
             elif t == "remove_bot":
                 sid = data.get("seat_idx")
-                if sid is not None and sid in room.members and room.members[sid].is_bot:
-                    await room.stand_up(sid)
-                    await room.push_state_to_all()
+                if sid is None or sid not in room.members or not room.members[sid].is_bot:
+                    await ws.send_json({"type": "error", "msg": "not a bot seat"})
+                    continue
+                if user.id != room.created_by:
+                    await ws.send_json({"type": "error", "msg": "仅房主可踢 AI"})
+                    continue
+                await room.stand_up(sid)
+                await room.push_state_to_all()
             elif t == "action":
                 if seat_idx is None:
                     await ws.send_json({"type": "error", "msg": "not seated"})

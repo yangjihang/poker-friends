@@ -1,8 +1,7 @@
-"""Rule-based poker bots, 5 difficulty tiers.
+"""Rule-based poker bots, 3 difficulty tiers.
 
-Phase 1 ships minimum viable versions — Rookie is random, Regular plays a
-simple value-oriented strategy, and the harder tiers currently extend Regular.
-Phase 2 will flesh out Patron/SemiPro/Pro with Monte Carlo equity.
+Rookie is random; Patron plays a simple value-oriented strategy; Pro currently
+reuses Patron's strategy and will be upgraded later with Monte Carlo equity.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import random
 from app.game.bots.base import Bot, BotDecision
 from app.game.engine import HandEngine
 
-TIERS = ("rookie", "regular", "patron", "semi_pro", "pro")
+TIERS = ("rookie", "patron", "pro")
 
 
 _RANK_VAL = {r: i for i, r in enumerate("23456789TJQKA", start=2)}
@@ -129,8 +128,8 @@ class RookieBot:
         return BotDecision("fold")
 
 
-class RegularBot:
-    tier = "regular"
+class PatronBot:
+    tier = "patron"
 
     def decide(self, engine: HandEngine, seat_idx: int) -> BotDecision:
         la = engine.legal_actions()
@@ -194,27 +193,17 @@ class RegularBot:
         return BotDecision("fold") if la.can_fold else BotDecision("call")
 
 
-class PatronBot(RegularBot):
-    tier = "patron"
-
-
-class SemiProBot(RegularBot):
-    tier = "semi_pro"
-
-
-class ProBot(RegularBot):
+class ProBot(PatronBot):
     tier = "pro"
 
 
 _REGISTRY: dict[str, type[Bot]] = {
     "rookie": RookieBot,
-    "regular": RegularBot,
     "patron": PatronBot,
-    "semi_pro": SemiProBot,
     "pro": ProBot,
 }
 
 
 def make_bot(tier: str) -> Bot:
-    cls = _REGISTRY.get(tier, RegularBot)
+    cls = _REGISTRY.get(tier, PatronBot)
     return cls()

@@ -12,6 +12,7 @@ export type ServerMessage =
   | { type: "hand_end"; data: any }
   | { type: "room_closed"; data: any }
   | { type: "chat"; from: string; text: string }
+  | { type: "balance_update"; balance: number }
   | { type: "error"; msg: string };
 
 export class GameSocket {

@@ -22,4 +22,14 @@ async def current_user(
     user = await session.scalar(select(User).where(User.id == int(payload["sub"])))
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
+    # 密码版本对不上（改密/重置后的旧 token），作废。
+    token_pv = int(payload.get("pv", 0))
+    if token_pv != (user.password_version or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token expired (password changed)")
+    return user
+
+
+async def require_admin(user: User = Depends(current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "admin only")
     return user

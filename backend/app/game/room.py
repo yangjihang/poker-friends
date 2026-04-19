@@ -10,12 +10,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
+
+from app.bank import adjust_balance
 from app.config import get_settings
 from app.db import SessionLocal
 from app.game.bots import make_bot
 from app.game.engine import ActionResult, HandEngine, SeatInfo
+from app.game.membership import mark_left as _member_mark_left
+from app.game.membership import update_stack as _member_update_stack
 from app.game.recorder import Recorder
+from app.models import LedgerEntry
 from app.models import Room as RoomModel
+from app.models import User
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -46,6 +53,7 @@ class Room:
         bb: int,
         buyin_min: int,
         buyin_max: int,
+        created_by: int,
         max_seats: int = 9,
     ):
         self.id = id
@@ -55,6 +63,7 @@ class Room:
         self.bb = bb
         self.buyin_min = buyin_min
         self.buyin_max = buyin_max
+        self.created_by = created_by
         self.max_seats = max_seats
 
         self.members: dict[int, Member] = {}
@@ -73,6 +82,13 @@ class Room:
         # and avoids collision when two humans happen to share a display name.
         self.standings: dict[str, dict[str, Any]] = {}
         self.final_standings: list[dict[str, Any]] | None = None
+        # 已离桌玩家的待结算 stack 累计（user_id -> amount）。
+        # 关桌时把在座玩家的 stack 也合进来，然后统一写 ledger + 回 bank。
+        self.cashouts: dict[int, int] = {}
+        self._cashouts_done: bool = False
+        # 崩溃止损相关：上次 RoomMember snapshot 成功的 hand_no，用于观察偏差
+        self._last_snapshot_hand_no: int = 0
+        self._snapshot_fail_streak: int = 0
 
     # ---- membership ----
 
@@ -139,21 +155,92 @@ class Room:
                 raise ValueError("still has chips")
             if not (self.buyin_min <= buyin <= self.buyin_max):
                 raise ValueError("buyin out of range")
-            m.stack = buyin
+            # 累加后不能超过 buyin_max，否则会绕过房间上限
+            if m.stack + buyin > self.buyin_max:
+                raise ValueError(
+                    f"stack {m.stack} + buyin {buyin} 超过 buyin_max {self.buyin_max}"
+                )
+            m.stack += buyin
             m.sitting_out = False
             self._membership_event.set()
 
-    async def stand_up(self, seat_idx: int) -> None:
+    async def stand_up(self, seat_idx: int) -> int:
+        """离桌。返回捕获到的 stack（用于调试/日志）。
+
+        人类离桌：stack 立即回灌 bank + 写 ledger，用户可以马上去别的桌 buyin。
+        DB 写失败会写一条 pending 审计 ledger + 暂存 self.cashouts，等关桌时重试。
+        手牌进行中：从 engine 取实时 stack，动作队列塞 fold 立即解除等待。
+        bot 离桌：丢弃 stack，不走 bank。
+
+        注意：DB I/O 不在 self._lock 内，避免阻塞游戏循环/其他 sit/rebuy。
+        """
+        # ---- 阶段 1：锁内修改内存状态，拿到 stack 和 user_id ----
         async with self._lock:
-            m = self.members.pop(seat_idx, None)
-            # If they were the current actor, unblock the game loop with a fold
-            # so the next seat can act immediately.
-            if m and m.action_channel is not None:
+            m = self.members.get(seat_idx)
+            if not m:
+                return 0
+            stack = m.stack
+            if self._current_engine and seat_idx in self._current_engine.seats_by_idx:
+                try:
+                    stack = int(self._current_engine.stack_of(seat_idx))
+                except Exception:
+                    stack = m.stack
+            user_id = m.user_id
+            self.members.pop(seat_idx, None)
+            if m.action_channel is not None:
                 try:
                     m.action_channel.put_nowait({"action": "fold"})
                 except asyncio.QueueFull:
                     pass
             self._membership_event.set()
+
+        # ---- 阶段 2：锁外做 DB 结算 + RoomMember mark_left ----
+        if user_id is None:
+            return stack
+        settled = False
+        try:
+            async with SessionLocal() as session:
+                # RoomMember 标记离桌（就算 stack=0 也要标，方便审计）
+                await _member_mark_left(
+                    session, room_id=self.id, user_id=user_id, final_stack=stack
+                )
+                if stack > 0:
+                    u = await session.scalar(
+                        select(User).where(User.id == user_id).with_for_update()
+                    )
+                    if u:
+                        await adjust_balance(
+                            session, user=u, amount=stack, type="room_cashout",
+                            room_id=self.id, note=f"离桌 {self.code}",
+                        )
+                await session.commit()
+                settled = True
+        except Exception:
+            log.exception("stand settle failed for user %d", user_id)
+        # stack=0 的情况不做兜底（没钱可补）
+        if stack <= 0:
+            return stack
+        if not settled:
+            # 兜底 1：内存记录，关桌时重试
+            async with self._lock:
+                self.cashouts[user_id] = self.cashouts.get(user_id, 0) + stack
+            # 兜底 2：尽可能落一条审计痕迹，方便事后对账
+            try:
+                async with SessionLocal() as session:
+                    session.add(
+                        LedgerEntry(
+                            user_id=user_id,
+                            type="room_cashout_pending",
+                            amount=stack,
+                            balance_after=0,
+                            room_id=self.id,
+                            note=f"离桌 {self.code} 结算失败，待关桌重试",
+                        )
+                    )
+                    await session.commit()
+            except Exception:
+                log.exception("pending ledger write also failed")
+        return stack
 
     def member_by_user(self, user_id: int) -> Member | None:
         for m in self.members.values():
@@ -250,6 +337,7 @@ class Room:
             "buyin_min": self.buyin_min,
             "buyin_max": self.buyin_max,
             "max_seats": self.max_seats,
+            "created_by": self.created_by,
             "button_seat": self.button_seat,
             "hand_no": self.hand_no,
             "seats": seats_payload,
@@ -321,6 +409,11 @@ class Room:
         self._membership_event.set()
         if self._task:
             self._task.cancel()
+        # 进程停机前尽量把筹码回灌到 bank（幂等）。
+        try:
+            await self._finalize_cashouts()
+        except Exception:
+            log.exception("cashout on close failed for room %s", self.code)
 
     async def _run(self) -> None:
         try:
@@ -373,6 +466,7 @@ class Room:
             if self._closed:
                 return
             self._closed = True
+        await self._finalize_cashouts()
         final = sorted(
             self.standings.values(), key=lambda v: v["net"], reverse=True
         )
@@ -391,6 +485,42 @@ class Room:
         )
         # Final state push so clients see closed=True + final_standings.
         await self.push_state_to_all()
+
+    async def _finalize_cashouts(self) -> None:
+        """关桌/进程停机时统一结算：把所有在座 member 的 stack 以及 cashouts 里的
+        待结算金额全部回灌到对应 user 的 bank，并写 ledger。幂等（只会结算一次）。
+        """
+        async with self._lock:
+            if self._cashouts_done:
+                return
+            self._cashouts_done = True
+            # 把还在座的人的 stack 也合进 cashouts。
+            for m in self.members.values():
+                if m.user_id is not None and m.stack > 0:
+                    self.cashouts[m.user_id] = self.cashouts.get(m.user_id, 0) + m.stack
+            pending = {uid: amt for uid, amt in self.cashouts.items() if amt > 0}
+            self.cashouts.clear()
+        if not pending:
+            return
+        try:
+            async with SessionLocal() as session:
+                for user_id, amount in pending.items():
+                    u = await session.scalar(
+                        select(User).where(User.id == user_id).with_for_update()
+                    )
+                    if not u:
+                        continue
+                    await adjust_balance(
+                        session,
+                        user=u,
+                        amount=amount,
+                        type="room_cashout",
+                        room_id=self.id,
+                        note=f"房间 {self.code} 关闭结算",
+                    )
+                await session.commit()
+        except Exception:
+            log.exception("failed to settle cashouts for room %s", self.code)
 
     def _active_seats(self) -> list[int]:
         return sorted(
@@ -513,9 +643,12 @@ class Room:
             self.standings[key] = entry
 
         # sync stacks back to members
+        human_updates: list[tuple[int, int]] = []  # (user_id, stack)
         for s in seats_in_hand:
             if s in self.members:
                 self.members[s].stack = engine.stack_of(s)
+                if self.members[s].user_id is not None:
+                    human_updates.append((self.members[s].user_id, self.members[s].stack))
                 if self.members[s].stack < self.bb:
                     if self.members[s].is_bot:
                         # Broke bot vacates the seat instead of sitting out,
@@ -524,6 +657,31 @@ class Room:
                         self._membership_event.set()
                     else:
                         self.members[s].sitting_out = True
+
+        # 每手末把人类玩家最新 stack 刷到 RoomMember（崩溃止损）
+        if human_updates:
+            try:
+                async with SessionLocal() as session:
+                    for uid, stk in human_updates:
+                        await _member_update_stack(
+                            session, room_id=self.id, user_id=uid, stack=stk
+                        )
+                    await session.commit()
+                self._last_snapshot_hand_no = self.hand_no
+                self._snapshot_fail_streak = 0
+            except Exception:
+                self._snapshot_fail_streak += 1
+                behind = self.hand_no - self._last_snapshot_hand_no
+                log.exception(
+                    "hand_end member snapshot failed (fail_streak=%d, behind=%d hands)",
+                    self._snapshot_fail_streak, behind,
+                )
+                # 连续失败 5 手或落后 10 手以上，打 WARN（运维可按日志 grep 告警）
+                if self._snapshot_fail_streak >= 5 or behind >= 10:
+                    log.warning(
+                        "room %s RoomMember snapshot stale: last_ok_hand=%d, current=%d",
+                        self.code, self._last_snapshot_hand_no, self.hand_no,
+                    )
 
         showdown_info = None
         if engine.went_to_showdown:
@@ -554,7 +712,7 @@ class Room:
             await asyncio.sleep(
                 random.uniform(settings.bot_think_min_s, settings.bot_think_max_s)
             )
-            decision = make_bot(member.bot_tier or "regular").decide(engine, member.seat_idx)
+            decision = make_bot(member.bot_tier or "patron").decide(engine, member.seat_idx)
             return decision.action, decision.amount
 
         # human: wait on queue

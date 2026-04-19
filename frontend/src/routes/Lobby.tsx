@@ -25,19 +25,25 @@ function fmtCountdown(ms: number): string {
 
 export default function Lobby() {
   const user = useAuth((s) => s.user);
+  const hydrate = useAuth((s) => s.hydrate);
   const logout = useAuth((s) => s.logout);
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [joinCode, setJoinCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showChangePw, setShowChangePw] = useState(false);
   const navigate = useNavigate();
   const now = useNow(1000);
 
   useEffect(() => {
-    API.listRooms().then(setRooms).catch(() => {});
-    const t = setInterval(() => API.listRooms().then(setRooms).catch(() => {}), 4000);
+    const refresh = () => {
+      API.listRooms().then(setRooms).catch(() => {});
+      API.me().then(hydrate).catch(() => {});
+    };
+    refresh();
+    const t = setInterval(refresh, 4000);
     return () => clearInterval(t);
-  }, []);
+  }, [hydrate]);
 
   async function create(payload: any) {
     try {
@@ -60,11 +66,20 @@ export default function Lobby() {
 
   return (
     <div className="min-h-screen px-4 py-6 max-w-2xl mx-auto">
-      <header className="flex items-center justify-between mb-6">
+      <header className="flex items-center justify-between mb-6 flex-wrap gap-2">
         <h1 className="text-xl font-bold">朋友局 · 大厅</h1>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-sm flex-wrap">
           <span className="opacity-80">{user?.display_name}</span>
+          <span className="px-2 py-1 rounded bg-chip-gold/20 text-chip-gold font-semibold">
+            余额 {user?.balance ?? 0}
+          </span>
           <Link to="/hands" className="px-2 py-1 rounded bg-black/30">手牌历史</Link>
+          <button onClick={() => setShowChangePw(true)} className="px-2 py-1 rounded bg-black/30">
+            改密码
+          </button>
+          {user?.is_admin && (
+            <Link to="/admin" className="px-2 py-1 rounded bg-red-600/80">管理</Link>
+          )}
           <button onClick={logout} className="px-2 py-1 rounded bg-black/30">退出</button>
         </div>
       </header>
@@ -115,6 +130,96 @@ export default function Lobby() {
       </section>
 
       {err && <div className="text-red-300 text-sm">{err}</div>}
+
+      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
+    </div>
+  );
+}
+
+function ChangePasswordModal({ onClose }: { onClose: () => void }) {
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const user = useAuth((s) => s.user);
+  const setAuth = useAuth((s) => s.setAuth);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    if (newPw !== newPw2) {
+      setErr("两次新密码不一致");
+      return;
+    }
+    if (newPw.length < 6) {
+      setErr("新密码至少 6 位");
+      return;
+    }
+    if (newPw === oldPw) {
+      setErr("新密码不能与原密码相同");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await API.changePassword(oldPw, newPw);
+      // 后端已 bump password_version，必须用新 token 替换本地，否则下一个请求会 401
+      if (user) setAuth(res.access_token, user);
+      setOk(true);
+      setTimeout(onClose, 1500);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-2">
+      <form onSubmit={submit} className="bg-feltLight rounded-2xl p-5 w-full max-w-sm space-y-3">
+        <div className="font-semibold">修改密码</div>
+        <label className="block text-sm">
+          原密码
+          <input
+            type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)}
+            required autoFocus
+            className="mt-1 w-full rounded px-3 py-2 bg-black/40"
+          />
+        </label>
+        <label className="block text-sm">
+          新密码（≥6 位）
+          <input
+            type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)}
+            required minLength={6}
+            className="mt-1 w-full rounded px-3 py-2 bg-black/40"
+          />
+        </label>
+        <label className="block text-sm">
+          确认新密码
+          <input
+            type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)}
+            required minLength={6}
+            className="mt-1 w-full rounded px-3 py-2 bg-black/40"
+          />
+        </label>
+        {err && <div className="text-red-300 text-sm">{err}</div>}
+        {ok && <div className="text-green-300 text-sm">已修改</div>}
+        <div className="flex gap-2">
+          <button
+            type="button" onClick={onClose}
+            className="flex-1 py-2 rounded-full bg-black/40 text-sm"
+          >
+            取消
+          </button>
+          <button
+            type="submit" disabled={busy || ok}
+            className="flex-1 py-2 rounded-full bg-chip-gold text-black font-semibold text-sm disabled:opacity-40"
+          >
+            {busy ? "提交中…" : ok ? "✓" : "确认"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

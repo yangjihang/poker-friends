@@ -27,11 +27,12 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int, username: str) -> str:
+def create_access_token(user_id: int, username: str, password_version: int = 0) -> str:
     s = get_settings()
     payload = {
         "sub": str(user_id),
         "username": username,
+        "pv": password_version,  # 改密后用户所有旧 token 将被作废
         "exp": datetime.now(timezone.utc) + timedelta(hours=s.jwt_exp_hours),
         "iat": datetime.now(timezone.utc),
     }

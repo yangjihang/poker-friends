@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: poker
-      POSTGRES_PASSWORD: poker
-      POSTGRES_DB: poker
+      POSTGRES_USER: ${POSTGRES_USER:-poker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poker}
+      POSTGRES_DB: ${POSTGRES_DB:-poker}
     volumes:
       - poker-db:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U poker"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-poker}"]
       interval: 3s
       retries: 20
 
@@ -18,8 +18,14 @@ services:
     build:
       context: ../backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://poker:poker@db:5432/poker
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://poker:poker@db:5432/poker}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      REGISTER_BONUS: ${REGISTER_BONUS:-20000}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_DISPLAY_NAME: ${ADMIN_DISPLAY_NAME:-Admin}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
@@ -34,7 +40,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "${WEB_PORT:-8080}:80"
 
 volumes:
   poker-db:

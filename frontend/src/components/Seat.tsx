@@ -13,6 +13,7 @@ type Props = {
   timeoutS?: number;
   onSit?: () => void;
   onAddBot?: () => void;
+  onRemoveBot?: () => void;
   canSit?: boolean;
 };
 
@@ -85,7 +86,7 @@ function avatarInitials(name: string): string {
   return ch;
 }
 
-export function Seat({ seat, isMe, isActor, isButton, cards, bb, deadlineMs, timeoutS, onSit, onAddBot, canSit }: Props) {
+export function Seat({ seat, isMe, isActor, isButton, cards, bb, deadlineMs, timeoutS, onSit, onAddBot, onRemoveBot, canSit }: Props) {
   if (seat.empty) {
     return (
       <div className="flex flex-col items-center gap-1">
@@ -151,6 +152,15 @@ export function Seat({ seat, isMe, isActor, isButton, cards, bb, deadlineMs, tim
           <span className="absolute -bottom-1 -left-1 text-[10px] bg-chip-gold text-black rounded-full w-5 h-5 flex items-center justify-center font-bold shadow">
             D
           </span>
+        )}
+        {seat.is_bot && onRemoveBot && (
+          <button
+            onClick={onRemoveBot}
+            title="踢掉这个 AI"
+            className="absolute -top-1 -left-1 w-5 h-5 rounded-full bg-red-600 hover:bg-red-500 text-white text-[11px] leading-none flex items-center justify-center shadow z-10"
+          >
+            ✕
+          </button>
         )}
       </div>
       <div className="mt-0.5 px-2 py-0.5 rounded-full bg-black/60 text-[11px]">

@@ -4,6 +4,7 @@ import Login from "./routes/Login";
 import Lobby from "./routes/Lobby";
 import Table from "./routes/Table";
 import Hands from "./routes/Hands";
+import Admin from "./routes/Admin";
 import { API } from "./lib/api";
 import { useAuth } from "./store/auth";
 
@@ -32,6 +33,7 @@ export default function App() {
       <Route path="/" element={<Guard><Lobby /></Guard>} />
       <Route path="/hands" element={<Guard><Hands /></Guard>} />
       <Route path="/room/:code" element={<Guard><Table /></Guard>} />
+      <Route path="/admin" element={<Guard><Admin /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
