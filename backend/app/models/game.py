@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -57,11 +57,18 @@ class Hand(Base):
     sb: Mapped[int] = mapped_column(Integer)
     bb: Mapped[int] = mapped_column(Integer)
     seats: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # 参与这手的人类 user_id 列表，用 GIN 索引做 `my_hands` 查询（避免扫 seats JSONB）。
+    user_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default="{}"
+    )
     board: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     pot_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     winner_summary: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
-    __table_args__ = (Index("ix_hands_room_started", "room_id", "started_at"),)
+    __table_args__ = (
+        Index("ix_hands_room_started", "room_id", "started_at"),
+        Index("ix_hands_user_ids", "user_ids", postgresql_using="gin"),
+    )
 
 
 class Action(Base):

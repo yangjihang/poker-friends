@@ -40,6 +40,8 @@ class Recorder:
             }
             for s in self.seats
         }
+        # 人类玩家 id 列表，写到 hands.user_ids 列供 my_hands 查询（GIN 索引）
+        user_ids = sorted({s.user_id for s in self.seats if s.user_id is not None})
         try:
             async with SessionLocal() as session:
                 hand = Hand(
@@ -49,6 +51,7 @@ class Recorder:
                     sb=self.engine.sb,
                     bb=self.engine.bb,
                     seats=seats_snapshot,
+                    user_ids=user_ids,
                     board={},
                 )
                 session.add(hand)
