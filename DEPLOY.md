@@ -77,10 +77,21 @@ DB schema 变了也没关系 —— [backend/app/db.py](backend/app/db.py) `init
 `create_all` + `ALTER TABLE ... IF NOT EXISTS`，新列加在那里即可，没有 Alembic 迁移。
 
 **已有的自动迁移**（老库升级上来会幂等执行）：
-- `rooms.closes_at` / `rooms.final_standings`
-- `users.balance`（BIGINT）/ `users.is_admin` / `users.password_version`
+- `rooms.closes_at` / `rooms.final_standings` / `rooms.allow_guest`
+- `users.balance`（BIGINT）/ `users.is_admin` / `users.password_version` / `users.is_guest`
 - `ledger_entries.amount` 和 `balance_after` 升到 BIGINT（兼容旧 INTEGER 数据）
+- `ledger_entries.acked_at`（pending cashout 对账用）
 - `hands.user_ids INTEGER[]` + GIN 索引，并且自动从旧 `seats` JSONB 回填历史数据
+- `room_members` partial unique `(room_id, user_id) WHERE left_at IS NULL`
+
+### 游客模式（2026-04）
+
+- `POST /api/auth/guest`：匿名创建 `guest_<hex>` 账号，跳过邀请码，一次性发 play-money。
+  单 IP 每日上限（默认 5）走进程内计数器，重启 / 多实例会各自计数——MVP 够用，量大时换 Redis。
+- 建房时可勾选 `allow_guest=true`，只有这种房允许游客 sit；默认 `false`（真钱房，纯邀请用户）。
+- 游客不能开房、不能 /change_password，列房时只能看到 `allow_guest=true` 的。
+- 相关可调 env（都有合理默认，可不配）：`GUEST_STAKE=10000` / `GUEST_PER_IP_PER_DAY=5`。
+  想彻底关掉入口：前端去掉 Login 页的"游客试玩"按钮即可（后端 API 本身开着也无害）。
 
 ## 六、备份（方案 A 适用）
 
