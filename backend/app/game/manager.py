@@ -38,6 +38,7 @@ class RoomManager:
         buyin_max: int,
         created_by: int,
         max_seats: int = 9,
+        allow_guest: bool = False,
     ) -> Room:
         async with self._lock:
             for _ in range(10):
@@ -59,6 +60,7 @@ class RoomManager:
                 max_seats=max_seats,
                 created_by=created_by,
                 closes_at=closes_at,
+                allow_guest=allow_guest,
             )
             session.add(room_model)
             await session.flush()
@@ -74,6 +76,7 @@ class RoomManager:
                 buyin_max=buyin_max,
                 created_by=created_by,
                 max_seats=max_seats,
+                allow_guest=allow_guest,
             )
             room.closes_at = closes_at
             room.start_loop()
@@ -97,6 +100,7 @@ class RoomManager:
                 buyin_max=rm.buyin_max,
                 created_by=rm.created_by,
                 max_seats=rm.max_seats,
+                allow_guest=bool(rm.allow_guest),
             )
             room.closes_at = rm.closes_at
             room.start_loop()

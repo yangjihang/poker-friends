@@ -60,6 +60,8 @@ export default function Table() {
   const [botModal, setBotModal] = useState<{ seat: number } | null>(null);
   const [rebuyOpen, setRebuyOpen] = useState(false);
   const [buyin, setBuyin] = useState(0);
+  // 预设行动：非自己行动时选好，轮到时自动触发一次。hand_start 会清空。
+  const [preset, setPreset] = useState<"fold" | "call" | "allin" | null>(null);
   const wsRef = useRef<GameSocket | null>(null);
 
   useEffect(() => {
@@ -70,6 +72,7 @@ export default function Table() {
         if (m.kind === "hand_start") {
           setShowdown(null);
           setHandSummary(null);
+          setPreset(null);
           setFlash("新一手开始");
           setTimeout(() => setFlash(null), 1000);
         }
@@ -114,6 +117,32 @@ export default function Table() {
   const isMyTurn = mySeat != null && engine?.actor_seat === mySeat;
   const bb = room?.bb ?? 1;
   const isHost = me != null && room?.created_by === me.id;
+
+  // 轮到自己且 preset 有值：按预设自动发一次 action，清掉 preset 避免重复触发
+  useEffect(() => {
+    if (!isMyTurn || preset == null) return;
+    const legal = engine?.legal;
+    const ws = wsRef.current;
+    if (!legal || !ws) return;
+    if (preset === "fold") {
+      ws.send(legal.can_check
+        ? { type: "action", action: "check" }
+        : { type: "action", action: "fold" });
+    } else if (preset === "call") {
+      ws.send(legal.can_check
+        ? { type: "action", action: "check" }
+        : legal.can_call
+          ? { type: "action", action: "call" }
+          : { type: "action", action: "fold" });
+    } else {
+      ws.send(legal.can_raise
+        ? { type: "action", action: "raise", amount: legal.max_raise_to }
+        : legal.can_call
+          ? { type: "action", action: "call" }
+          : { type: "action", action: "fold" });
+    }
+    setPreset(null);
+  }, [isMyTurn, engine?.legal, preset]);
 
   function sendAction(action: string, amount?: number) {
     wsRef.current?.send({ type: "action", action, amount });
@@ -391,6 +420,13 @@ export default function Table() {
               再买入继续
             </button>
           </div>
+        ) : mySeat != null && engine && engine.actor_seat != null && engine.actor_seat !== mySeat ? (
+          <div className="h-full flex flex-col items-center justify-center gap-2 px-4 py-3 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+            <div className="text-[11px] text-white/50">
+              等待 {engineSeat(engine.actor_seat)?.display_name ?? "对手"} · 预设下一步
+            </div>
+            <PresetPanel preset={preset} setPreset={setPreset} />
+          </div>
         ) : (
           <div className="h-full flex items-center justify-center text-sm text-white/50 px-4 py-6 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
             {engine?.actor_seat != null
@@ -533,6 +569,35 @@ function ActionBar({
       }`}
     >
       {children}
+    </div>
+  );
+}
+
+function PresetPanel({
+  preset,
+  setPreset,
+}: {
+  preset: "fold" | "call" | "allin" | null;
+  setPreset: (p: "fold" | "call" | "allin" | null) => void;
+}) {
+  const items: Array<{ key: "fold" | "call" | "allin"; label: string; cls: string }> = [
+    { key: "fold", label: "自动弃/过", cls: "bg-red-700" },
+    { key: "call", label: "任何跟注", cls: "bg-blue-700" },
+    { key: "allin", label: "全下", cls: "bg-chip-gold text-black" },
+  ];
+  return (
+    <div className="flex gap-2 w-full max-w-md">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          onClick={() => setPreset(preset === it.key ? null : it.key)}
+          className={`flex-1 py-2 rounded-xl text-sm font-semibold transition ${
+            preset === it.key ? `${it.cls} ring-2 ring-white` : "bg-white/10 text-white/80"
+          }`}
+        >
+          {it.label}
+        </button>
+      ))}
     </div>
   );
 }

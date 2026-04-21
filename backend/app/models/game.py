@@ -28,6 +28,8 @@ class Room(Base):
     closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     final_standings: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # 游客模式开关：True 则 is_guest 用户可入座；False（默认）为真钱房，仅非游客可入。
+    allow_guest: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class RoomMember(Base):

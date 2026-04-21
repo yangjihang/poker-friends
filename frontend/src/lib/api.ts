@@ -35,6 +35,10 @@ export const API = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+  guest: () =>
+    api<{ access_token: string; user: AuthUser }>("/api/auth/guest", {
+      method: "POST",
+    }),
   me: () => api<AuthUser>("/api/auth/me"),
   changePassword: (old_password: string, new_password: string) =>
     api<{ ok: true; access_token: string }>("/api/auth/change_password", {
@@ -92,6 +96,7 @@ export type AuthUser = {
   display_name: string;
   balance: number;
   is_admin: boolean;
+  is_guest: boolean;
 };
 export type AdminUser = AuthUser & { created_at: string | null };
 export type LedgerEntry = {
@@ -130,6 +135,7 @@ export type CreateRoomPayload = {
   buyin_min: number;
   buyin_max: number;
   max_seats: number;
+  allow_guest?: boolean;
 };
 export type RoomSummary = {
   code: string;
@@ -139,6 +145,7 @@ export type RoomSummary = {
   seated: number;
   max_seats: number;
   closes_at: string | null;
+  allow_guest?: boolean;
 };
 export type StandingsEntry = {
   display_name: string;

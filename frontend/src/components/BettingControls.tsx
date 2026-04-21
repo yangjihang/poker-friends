@@ -40,24 +40,41 @@ export function BettingControls({
     setAmount(Math.max(legal.min_raise_to, Math.min(target, legal.max_raise_to)));
   };
 
+  // 10 档快捷 size：0.1 ~ 3 pot + 全下。Flex-wrap 允许手机端换行。
+  const sizes: Array<{ label: string; apply: () => void }> = [
+    { label: "⅒", apply: () => quick(0.1) },
+    { label: "⅕", apply: () => quick(0.2) },
+    { label: "⅓", apply: () => quick(1 / 3) },
+    { label: "½", apply: () => quick(0.5) },
+    { label: "¾", apply: () => quick(0.75) },
+    { label: "1池", apply: () => quick(1) },
+    { label: "1.5池", apply: () => quick(1.5) },
+    { label: "2池", apply: () => quick(2) },
+    { label: "3池", apply: () => quick(3) },
+    { label: "全下", apply: () => setAmount(legal.max_raise_to) },
+  ];
+
   return (
     <div className="px-3 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
       {legal.can_raise && (
         <>
-          <div className="flex gap-1 mb-2 justify-between items-center text-xs">
-            <div className="flex gap-1">
-              <button onClick={() => quick(0.5)} className="px-2 py-1 rounded bg-white/15">½池</button>
-              <button onClick={() => quick(0.75)} className="px-2 py-1 rounded bg-white/15">¾池</button>
-              <button onClick={() => quick(1)} className="px-2 py-1 rounded bg-white/15">底池</button>
-              <button onClick={() => setAmount(legal.max_raise_to)} className="px-2 py-1 rounded bg-white/15">全下</button>
-            </div>
+          <div className="flex flex-wrap gap-1 mb-2 items-center text-[11px]">
+            {sizes.map((s) => (
+              <button
+                key={s.label}
+                onClick={s.apply}
+                className="px-1.5 py-0.5 rounded bg-white/15 hover:bg-white/25"
+              >
+                {s.label}
+              </button>
+            ))}
             <input
               type="number"
               min={legal.min_raise_to}
               max={legal.max_raise_to}
               value={amount}
               onChange={(e) => setAmount(+e.target.value)}
-              className="w-20 text-right bg-black/40 px-2 py-1 rounded text-xs"
+              className="ml-auto w-20 text-right bg-black/40 px-2 py-0.5 rounded"
             />
           </div>
           <input

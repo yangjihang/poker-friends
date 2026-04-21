@@ -32,6 +32,20 @@ export default function Login() {
     }
   }
 
+  async function guestLogin() {
+    setErr(null);
+    setBusy(true);
+    try {
+      const res = await API.guest();
+      setAuth(res.access_token, res.user);
+      navigate("/");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
       <form onSubmit={submit} className="w-full max-w-sm bg-feltLight rounded-2xl p-6 shadow-xl space-y-4">
@@ -75,6 +89,22 @@ export default function Login() {
         {err && <div className="text-red-300 text-sm">{err}</div>}
         <button disabled={busy} className="w-full bg-chip-gold text-black py-2 rounded-full font-semibold disabled:opacity-60">
           {busy ? "处理中…" : mode === "login" ? "登录" : "注册并登录"}
+        </button>
+        <div className="relative py-1">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-white/20" />
+          </div>
+          <div className="relative flex justify-center">
+            <span className="bg-feltLight px-2 text-xs text-white/50">或</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={guestLogin}
+          disabled={busy}
+          className="w-full bg-black/40 py-2 rounded-full text-sm disabled:opacity-60"
+        >
+          游客试玩（仅 play-money 桌）
         </button>
       </form>
     </div>

@@ -107,6 +107,18 @@ def _clamp_raise(engine: HandEngine, target: int) -> int:
     return max(la.min_raise_to, min(target, la.max_raise_to))
 
 
+def _pot_raise_to(engine: HandEngine, pot_frac: float) -> int:
+    """Pot-based raise-to：raise 到 call_amount + (当前 pot) * frac，
+    clamp 到 legal 范围。避免裸 min-raise 的不自然节奏。
+    """
+    la = engine.legal_actions()
+    if not la.can_raise:
+        raise RuntimeError("cannot raise")
+    pot = max(engine.total_pot, engine.bb)
+    target = la.call_amount + int(round(pot * pot_frac))
+    return max(la.min_raise_to, min(target, la.max_raise_to))
+
+
 class RookieBot:
     tier = "rookie"
 
@@ -120,7 +132,8 @@ class RookieBot:
         if la.can_fold and roll < 0.95:
             return BotDecision("fold")
         if la.can_raise:
-            return BotDecision("raise", _clamp_raise(engine, la.min_raise_to))
+            # 菜鸟也不再纯 min-raise，按 0.5-0.75 pot 随机，贴合常规节奏
+            return BotDecision("raise", _pot_raise_to(engine, random.uniform(0.5, 0.75)))
         if la.can_check:
             return BotDecision("check")
         if la.can_call:
@@ -145,7 +158,11 @@ class PatronBot:
             cat = _hand_category(hole)
             if cat == "premium":
                 if la.can_raise:
-                    return BotDecision("raise", _clamp_raise(engine, 3 * engine.bb + la.call_amount))
+                    # 无 raise 前：3bb open；已有人 raise（call_amount > bb）：按 pot 节奏 3bet
+                    if la.call_amount <= engine.bb:
+                        target = 3 * engine.bb + la.call_amount
+                        return BotDecision("raise", _clamp_raise(engine, target))
+                    return BotDecision("raise", _pot_raise_to(engine, random.uniform(0.8, 1.0)))
                 if la.can_call:
                     return BotDecision("call")
             if cat == "strong":
@@ -170,14 +187,14 @@ class PatronBot:
         pot = engine.total_pot
         if strength >= 3:
             if la.can_raise:
-                return BotDecision("raise", _clamp_raise(engine, max(engine.bb, pot // 2 + la.call_amount)))
+                return BotDecision("raise", _pot_raise_to(engine, random.uniform(0.6, 0.85)))
             if la.can_call:
                 return BotDecision("call")
         if strength == 2:
             if la.can_check:
-                return BotDecision("check") if random.random() < 0.5 else (
-                    BotDecision("raise", _clamp_raise(engine, max(engine.bb, pot // 2))) if la.can_raise else BotDecision("check")
-                )
+                if random.random() < 0.5 and la.can_raise:
+                    return BotDecision("raise", _pot_raise_to(engine, random.uniform(0.45, 0.6)))
+                return BotDecision("check")
             if la.can_call and la.call_amount <= pot // 2:
                 return BotDecision("call")
             return BotDecision("fold") if la.can_fold else BotDecision("call")

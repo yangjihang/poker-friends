@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import secrets
+from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +18,9 @@ from app.game.manager import manager
 from app.models import Action, Hand, HoleCard, InviteCode, Room, RoomMember, User
 
 router = APIRouter(prefix="/api")
+
+# 单 IP 每日新建游客计数（进程内；重启/多实例会清零，MVP 够用）
+_guest_ip_counter: dict[str, tuple[date, int]] = {}
 
 
 # ---- auth ----
@@ -58,7 +62,18 @@ def _user_public(user: User) -> dict:
         "display_name": user.display_name,
         "balance": user.balance,
         "is_admin": user.is_admin,
+        "is_guest": bool(user.is_guest),
     }
+
+
+def _client_ip(request: Request) -> str:
+    # 反代透传的真实 IP；本地开发没有这个头时退到 socket 对端。
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
 
 
 @router.post("/auth/register", response_model=TokenResponse)
@@ -112,6 +127,62 @@ async def register(payload: RegisterPayload, session: AsyncSession = Depends(get
     return TokenResponse(access_token=token, user=_user_public(user))
 
 
+@router.post("/auth/guest", response_model=TokenResponse)
+async def guest(request: Request, session: AsyncSession = Depends(get_session)):
+    """创建临时游客账号：随机用户名、一次性 play-money stake、跳过邀请码。
+    单 IP 每日上限见 settings.guest_per_ip_per_day。
+    """
+    settings = get_settings()
+    ip = _client_ip(request)
+    today = datetime.now(timezone.utc).date()
+    prev = _guest_ip_counter.get(ip)
+    count = prev[1] if prev and prev[0] == today else 0
+    if count >= settings.guest_per_ip_per_day:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"该 IP 今日游客创建已达上限（{settings.guest_per_ip_per_day}）",
+        )
+
+    # 生成唯一 username：guest_<8 hex>；极小概率碰撞时重试。
+    for _ in range(8):
+        suffix = secrets.token_hex(4)
+        username = f"guest_{suffix}"
+        existing = await session.scalar(select(User).where(User.username == username))
+        if not existing:
+            break
+    else:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "无法生成游客用户名")
+
+    # 无密码登录：密码 hash 塞一个不可用的随机值，阻断用 login 口进入。
+    user = User(
+        username=username,
+        password_hash=hash_password(secrets.token_urlsafe(32)),
+        display_name=f"游客-{suffix[:4].upper()}",
+        balance=0,
+        is_guest=True,
+    )
+    session.add(user)
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "guest username collision")
+
+    if settings.guest_stake > 0:
+        await adjust_balance(
+            session,
+            user=user,
+            amount=settings.guest_stake,
+            type="guest_stake",
+            note="游客初始 play-money",
+        )
+    await session.commit()
+
+    _guest_ip_counter[ip] = (today, count + 1)
+    token = create_access_token(user.id, user.username, user.password_version)
+    return TokenResponse(access_token=token, user=_user_public(user))
+
+
 @router.post("/auth/login", response_model=TokenResponse)
 async def login(payload: LoginPayload, session: AsyncSession = Depends(get_session)):
     user = await session.scalar(select(User).where(User.username == payload.username))
@@ -158,6 +229,7 @@ class CreateRoomPayload(BaseModel):
     buyin_min: int = Field(ge=1)
     buyin_max: int = Field(ge=1)
     max_seats: int = Field(default=9, ge=2, le=9)
+    allow_guest: bool = False
 
     @field_validator("bb")
     @classmethod
@@ -184,6 +256,9 @@ async def create_room(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    # 游客不能开房，避免刷房 + 逃避真钱房的 allow_guest=False 限制
+    if user.is_guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "游客不能创建房间")
     room = await manager.create(
         session,
         name=payload.name,
@@ -193,12 +268,17 @@ async def create_room(
         buyin_max=payload.buyin_max,
         max_seats=payload.max_seats,
         created_by=user.id,
+        allow_guest=payload.allow_guest,
     )
     return {"code": room.code, "name": room.name}
 
 
 @router.get("/rooms")
 async def list_rooms(user: User = Depends(current_user)):
+    rooms = [r for r in manager.all() if not r.is_closed]
+    # 游客只能看到允许进的房，避免引导去敲不让坐的桌
+    if user.is_guest:
+        rooms = [r for r in rooms if r.allow_guest]
     return [
         {
             "code": r.code,
@@ -208,9 +288,9 @@ async def list_rooms(user: User = Depends(current_user)):
             "seated": len(r.members),
             "max_seats": r.max_seats,
             "closes_at": r.closes_at.isoformat() if r.closes_at else None,
+            "allow_guest": r.allow_guest,
         }
-        for r in manager.all()
-        if not r.is_closed
+        for r in rooms
     ]
 
 
@@ -235,6 +315,7 @@ async def get_room(
         "closes_at": room.closes_at.isoformat() if room.closes_at else None,
         "closed": room.is_closed,
         "final_standings": room.final_standings,
+        "allow_guest": room.allow_guest,
     }
 
 

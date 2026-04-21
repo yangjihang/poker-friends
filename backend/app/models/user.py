@@ -21,6 +21,8 @@ class User(Base):
     # BigInteger 避免 INT4 溢出（admin topup 手滑输大数字）。
     balance: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # 游客模式：无密码、跳过邀请码、一次性 play-money stake、只能进 allow_guest 房。
+    is_guest: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # 密码版本号：change_password / reset_password 后 +1，JWT 带这个字段，
     # 不匹配就视作失效，达到改密后旧 token 失效的效果。
     password_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

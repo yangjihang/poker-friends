@@ -81,6 +81,9 @@ async def game_ws(ws: WebSocket, code: str):
                 if seat_idx is not None:
                     await ws.send_json({"type": "error", "msg": "already seated"})
                     continue
+                if user.is_guest and not room.allow_guest:
+                    await ws.send_json({"type": "error", "msg": "该房间不允许游客入座"})
+                    continue
                 buyin = int(data.get("buyin") or room.buyin_max)
                 if not (room.buyin_min <= buyin <= room.buyin_max):
                     await ws.send_json({"type": "error", "msg": "buyin out of range"})

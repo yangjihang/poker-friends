@@ -55,6 +55,7 @@ class Room:
         buyin_max: int,
         created_by: int,
         max_seats: int = 9,
+        allow_guest: bool = False,
     ):
         self.id = id
         self.code = code
@@ -65,6 +66,7 @@ class Room:
         self.buyin_max = buyin_max
         self.created_by = created_by
         self.max_seats = max_seats
+        self.allow_guest = allow_guest
 
         self.members: dict[int, Member] = {}
         self.observers: list[asyncio.Queue] = []
@@ -89,6 +91,11 @@ class Room:
         # 崩溃止损相关：上次 RoomMember snapshot 成功的 hand_no，用于观察偏差
         self._last_snapshot_hand_no: int = 0
         self._snapshot_fail_streak: int = 0
+        # 上一手被清退的 bot 座位：_play_hand 结尾不立即 pop，延后到下一手开始前，
+        # 这样 showdown 阶段玩家仍能看到它们的底牌与 0 筹码。
+        self._pending_broke_bot_seats: list[int] = []
+        # 观战模式：没人类坐下但有 observer 时 bot 继续打并加速；为 False 时常规节奏。
+        self._fast_mode: bool = False
 
     # ---- membership ----
 
@@ -344,6 +351,7 @@ class Room:
             "closes_at": self.closes_at.isoformat() if self.closes_at else None,
             "closed": self._closed,
             "final_standings": self.final_standings,
+            "allow_guest": self.allow_guest,
         }
 
     def public_lobby_state(self) -> dict[str, Any]:
@@ -421,15 +429,32 @@ class Room:
                 if self._lifetime_expired():
                     await self._auto_close()
                     return
+                # 清理上一手延迟 pop 的 broke bot（_play_hand 结尾只打标记，
+                # 给 showdown 时间展示其底牌）
+                if self._pending_broke_bot_seats:
+                    for s in self._pending_broke_bot_seats:
+                        self.members.pop(s, None)
+                    self._pending_broke_bot_seats.clear()
+                    self._membership_event.set()
+                    await self.push_state_to_all()
                 active = [m for m in self.members.values() if not m.sitting_out]
                 humans_active = [m for m in active if not m.is_bot]
-                # bots only play when at least one human is active — otherwise
-                # they grind against each other forever.
-                if len(active) < 2 or not humans_active:
+                # 常态：至少一个活跃人类才打。无人类但有 observer 时进入"观战
+                # 模式"：bot 之间继续对打并加速；完全无人看时仍挂起节省 CPU。
+                if len(active) < 2:
+                    can_play = False
+                elif humans_active:
+                    can_play = True
+                    self._fast_mode = False
+                elif self.observers:
+                    can_play = True
+                    self._fast_mode = True
+                else:
+                    can_play = False
+                if not can_play:
+                    self._fast_mode = False
                     self._membership_event.clear()
                     await self.push_state_to_all()
-                    # Wake up whenever membership changes OR the lifetime is
-                    # about to expire, so idle rooms close on time.
                     timeout = self._seconds_until_close()
                     try:
                         if timeout is None:
@@ -446,9 +471,12 @@ class Room:
                 except Exception:
                     log.exception("hand loop error")
                     await asyncio.sleep(2)
-                await asyncio.sleep(settings.between_hands_s)
+                await asyncio.sleep(settings.between_hands_s * self._speed_factor())
         except asyncio.CancelledError:
             pass
+
+    def _speed_factor(self) -> float:
+        return settings.spectate_speed_factor if self._fast_mode else 1.0
 
     def _lifetime_expired(self) -> bool:
         return (
@@ -620,7 +648,7 @@ class Room:
                         }
                     )
                     await self.push_state_to_all()
-                    await asyncio.sleep(settings.runout_stage_s)
+                    await asyncio.sleep(settings.runout_stage_s * self._speed_factor())
                 engine.set_display_cap(None)
 
         await recorder.on_hand_end()
@@ -651,10 +679,9 @@ class Room:
                     human_updates.append((self.members[s].user_id, self.members[s].stack))
                 if self.members[s].stack < self.bb:
                     if self.members[s].is_bot:
-                        # Broke bot vacates the seat instead of sitting out,
-                        # so humans can reclaim it.
-                        self.members.pop(s, None)
-                        self._membership_event.set()
+                        # 延后 pop：showdown 期间要能看见被清退 bot 的底牌。
+                        # _run 循环下一次迭代前统一清掉。
+                        self._pending_broke_bot_seats.append(s)
                     else:
                         self.members[s].sitting_out = True
 
@@ -709,8 +736,12 @@ class Room:
         legal = engine.legal_actions()
         if member.is_bot:
             self._actor_deadline_ms = None
+            factor = self._speed_factor()
             await asyncio.sleep(
-                random.uniform(settings.bot_think_min_s, settings.bot_think_max_s)
+                random.uniform(
+                    settings.bot_think_min_s * factor,
+                    settings.bot_think_max_s * factor,
+                )
             )
             decision = make_bot(member.bot_tier or "patron").decide(engine, member.seat_idx)
             return decision.action, decision.amount

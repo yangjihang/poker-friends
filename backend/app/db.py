@@ -114,3 +114,10 @@ async def init_models() -> None:
         await conn.execute(
             text("ALTER TABLE ledger_entries ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ")
         )
+        # 游客模式：users.is_guest + rooms.allow_guest
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
+        )
+        await conn.execute(
+            text("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS allow_guest BOOLEAN NOT NULL DEFAULT FALSE")
+        )
